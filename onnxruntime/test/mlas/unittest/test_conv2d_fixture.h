@@ -46,23 +46,58 @@ class Conv2dShortExecuteTest : public MlasTestFixture<Conv2dTester> {
   }
 
   void TestBody() override {
-    MlasTestFixture<Conv2dTester>::mlas_tester->Test(
-        BatchCount_,
-        GroupCount_,
-        InputChannels_,
-        InputHeight_,
-        InputWidth_,
-        FilterCount_,
-        KernelHeight_,
-        KernelWidth_,
-        PaddingLeftHeight_,
-        PaddingLeftWidth_,
-        PaddingRightHeight_,
-        PaddingRightWidth_,
-        DilationHeight_,
-        DilationWidth_,
-        StrideHeight_,
-        StrideWidth_);
+    const char* iter_env = std::getenv("MLAS_BENCHMARK_ITERATIONS");
+    int benchmark_iterations = iter_env ? std::atoi(iter_env) : 100;
+    int warmup_iterations = benchmark_iterations > 1 ? 10 : 0;
+
+    if (benchmark_iterations > 1) {
+      for (int i = 0; i < warmup_iterations; i++) {
+        MlasTestFixture<Conv2dTester>::mlas_tester->Test(
+            BatchCount_, GroupCount_, InputChannels_,
+            InputHeight_, InputWidth_, FilterCount_,
+            KernelHeight_, KernelWidth_,
+            PaddingLeftHeight_, PaddingLeftWidth_,
+            PaddingRightHeight_, PaddingRightWidth_,
+            DilationHeight_, DilationWidth_,
+            StrideHeight_, StrideWidth_);
+      }
+
+      auto start = std::chrono::high_resolution_clock::now();
+
+      for (int i = 0; i < benchmark_iterations; i++) {
+        MlasTestFixture<Conv2dTester>::mlas_tester->Test(
+            BatchCount_, GroupCount_, InputChannels_,
+            InputHeight_, InputWidth_, FilterCount_,
+            KernelHeight_, KernelWidth_,
+            PaddingLeftHeight_, PaddingLeftWidth_,
+            PaddingRightHeight_, PaddingRightWidth_,
+            DilationHeight_, DilationWidth_,
+            StrideHeight_, StrideWidth_);
+      }
+
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+
+      double avg_time_us = duration.count() / double(benchmark_iterations);
+      double ops_per_sec = 1000000.0 / avg_time_us;
+
+      printf(
+          "BENCHMARK: B%zu/G%zu/IC%zu/FC%zu/IH%zu/IW%zu/KH%zu/KW%zu/Pad%zu,%zu,%zu,%zu/Dilation%zu,%zu/Stride%zu,%zu - "
+          "Avg: %.2f μs, Rate: %.2f ops/sec (%d iterations)\n",
+          BatchCount_, GroupCount_, InputChannels_, FilterCount_, InputHeight_, InputWidth_,
+          KernelHeight_, KernelWidth_, PaddingLeftHeight_, PaddingLeftWidth_, PaddingRightHeight_,
+          PaddingRightWidth_, DilationHeight_, DilationWidth_, StrideHeight_, StrideWidth_,
+          avg_time_us, ops_per_sec, benchmark_iterations);
+    } else {
+      MlasTestFixture<Conv2dTester>::mlas_tester->Test(
+          BatchCount_, GroupCount_, InputChannels_,
+          InputHeight_, InputWidth_, FilterCount_,
+          KernelHeight_, KernelWidth_,
+          PaddingLeftHeight_, PaddingLeftWidth_,
+          PaddingRightHeight_, PaddingRightWidth_,
+          DilationHeight_, DilationWidth_,
+          StrideHeight_, StrideWidth_);
+    }
   }
 
   static size_t RegisterSingleTest(
