@@ -4,6 +4,8 @@
 #pragma once
 
 #include "test_util.h"
+#include <chrono>
+#include <algorithm>
 
 template <bool Threaded>
 class MlasConv2DTest : public MlasTestBase {
@@ -215,22 +217,7 @@ class MlasConv2DTest : public MlasTestBase {
     float* Output = BufferOutput.GetBuffer(OutputElements);
     float* OutputReference = BufferOutputReference.GetBuffer(OutputElements);
 
-    MlasConv2D(BatchCount,
-               GroupCount,
-               InputChannels,
-               InputHeight, InputWidth,
-               FilterCount,
-               KernelHeight, KernelWidth,
-               PaddingLeftHeight, PaddingLeftWidth,
-               PaddingRightHeight, PaddingRightWidth,
-               DilationHeight, DilationWidth,
-               StrideHeight, StrideWidth,
-               OutputHeight, OutputWidth,
-               Input,
-               Filter,
-               Bias,
-               Output);
-
+    // Run ReferenceConv2D once to get the expected output
     ReferenceConv2D(BatchCount,
                     GroupCount,
                     InputChannels,
@@ -246,6 +233,44 @@ class MlasConv2DTest : public MlasTestBase {
                     Bias,
                     OutputReference);
 
+    // Performance measurement setup
+    const char* iter_env = std::getenv("MLAS_BENCHMARK_ITERATIONS");
+    const size_t benchmark_iterations = iter_env ? std::atoi(iter_env) : 100;
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Run MlasConv2D multiple times for performance measurement
+    for (size_t iter = 0; iter < benchmark_iterations; ++iter) {
+      // Clear output buffer for each iteration to ensure consistent state
+      std::fill(Output, Output + OutputElements, 0.0f);
+      
+      MlasConv2D(BatchCount,
+                 GroupCount,
+                 InputChannels,
+                 InputHeight, InputWidth,
+                 FilterCount,
+                 KernelHeight, KernelWidth,
+                 PaddingLeftHeight, PaddingLeftWidth,
+                 PaddingRightHeight, PaddingRightWidth,
+                 DilationHeight, DilationWidth,
+                 StrideHeight, StrideWidth,
+                 OutputHeight, OutputWidth,
+                 Input,
+                 Filter,
+                 Bias,
+                 Output);
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+
+    double avg_time_us = duration.count() / double(benchmark_iterations);
+    double ops_per_sec = 1000000.0 / avg_time_us;
+    
+    // Print performance results
+    printf("MlasConv2D Performance: %zu iterations, avg %.2f μs per iteration, total %.2f ms, rate: %.4f ops/sec\n",
+           benchmark_iterations, avg_time_us, duration.count() / 1000.0, ops_per_sec);
+
+    // Verify correctness by comparing the last iteration's output with reference
     ASSERT_EQ(memcmp(Output, OutputReference, OutputElements * sizeof(float)), 0)
         << "B" << BatchCount << "/"
         << "G" << GroupCount << "/"
