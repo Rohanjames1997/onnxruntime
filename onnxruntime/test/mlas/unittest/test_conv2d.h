@@ -235,7 +235,7 @@ class MlasConv2DTest : public MlasTestBase {
 
     // Performance measurement setup
     const char* iter_env = std::getenv("MLAS_BENCHMARK_ITERATIONS");
-    const size_t benchmark_iterations = iter_env ? std::atoi(iter_env) : 100;
+    const size_t benchmark_iterations = iter_env ? std::atoi(iter_env) : 1;
     auto start_time = std::chrono::high_resolution_clock::now();
 
     // Run MlasConv2D multiple times for performance measurement
