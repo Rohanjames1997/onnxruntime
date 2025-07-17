@@ -67,12 +67,111 @@ void
 
     const size_t TotalOutputCount = OutputCountLeftPad + OutputCount + OutputCountRightPad;
 
-    for (size_t output_idx = 0; output_idx < TotalOutputCount; output_idx++) {
-        bool is_main_region = (output_idx >= OutputCountLeftPad && output_idx < OutputCountLeftPad + OutputCount);
+    for (size_t filterSetBlock = 0; filterSetBlock < FilterCount; filterSetBlock++) {
+        const float* filter = Filter + filterSetBlock * FilterStrideElements;
+        float* output = Output + filterSetBlock * OutputStrideElements;
+        const float* bias_ptr = BiasAddition ? &Bias[filterSetBlock * BlockSize] : nullptr;
 
-        for (size_t filterSetBlock = 0; filterSetBlock < FilterCount; filterSetBlock++) {
-            const float* filter = Filter + filterSetBlock * FilterStrideElements;
-            float* output = Output + filterSetBlock * OutputStrideElements;
+        size_t output_idx;
+        for (output_idx = 0; output_idx + 1 < TotalOutputCount; output_idx += 2) {
+            bool is_main_region0 = (output_idx >= OutputCountLeftPad && output_idx < OutputCountLeftPad + OutputCount);
+            bool is_main_region1 = (output_idx + 1 >= OutputCountLeftPad && output_idx + 1 < OutputCountLeftPad + OutputCount);
+
+            float32x4_t Accumulator0, Accumulator1;
+
+            if (AccumulateOutput) {
+                Accumulator0 = MlasLoadFloat32x4(&output[output_idx * BlockSize]);
+                Accumulator1 = MlasLoadFloat32x4(&output[(output_idx + 1) * BlockSize]);
+            } else {
+                Accumulator0 = MlasBroadcastFloat32x4(0.0f);
+                Accumulator1 = MlasBroadcastFloat32x4(0.0f);
+            }
+
+            if (BiasAddition) {
+                const float32x4_t BiasVector = MlasLoadFloat32x4(bias_ptr);
+                Accumulator0 = MlasAddFloat32x4(Accumulator0, BiasVector);
+                Accumulator1 = MlasAddFloat32x4(Accumulator1, BiasVector);
+            }
+
+            for (size_t kh = 0; kh < KernelHeight; kh++) {
+                const float* input_row_start = InputBase + kh * DilatedInputWidthElements;
+                const float* input_row_end = input_row_start + InputWidthElements;
+
+                for (size_t kw = 0; kw < KernelWidth; kw++) {
+                    const float* input_base0 = Input + output_idx * StrideWidthElements +
+                                               kh * DilatedInputWidthElements + kw * DilationWidthElements;
+                    const float* input_base1 = Input + (output_idx + 1) * StrideWidthElements +
+                                               kh * DilatedInputWidthElements + kw * DilationWidthElements;
+
+                    if (IsNchwcFormat) {
+                        for (size_t filterBlock = 0; filterBlock < 4; filterBlock++) {
+                            const float* input_element0 = input_base0 + filterBlock;
+                            const float* input_element1 = input_base1 + filterBlock;
+
+                            float input_value0, input_value1;
+
+                            if (is_main_region0 || (input_element0 >= input_row_start && input_element0 < input_row_end)) {
+                                input_value0 = *input_element0;
+                            } else {
+                                input_value0 = 0.0f;
+                            }
+
+                            if (is_main_region1 || (input_element1 >= input_row_start && input_element1 < input_row_end)) {
+                                input_value1 = *input_element1;
+                            } else {
+                                input_value1 = 0.0f;
+                            }
+
+                            const float32x4_t InputVector0 = MlasBroadcastFloat32x4(input_value0);
+                            const float32x4_t InputVector1 = MlasBroadcastFloat32x4(input_value1);
+
+                            size_t kernel_base_pos = kh * (KernelWidth * 16) +
+                                                     kw * 16 +
+                                                     filterBlock * 4;
+
+                            const float32x4_t FilterVector = MlasLoadFloat32x4(&filter[kernel_base_pos]);
+
+                            Accumulator0 = MlasMultiplyAddFloat32x4(InputVector0, FilterVector, Accumulator0);
+                            Accumulator1 = MlasMultiplyAddFloat32x4(InputVector1, FilterVector, Accumulator1);
+                        }
+                    } else {
+                        float input_value0, input_value1;
+
+                        if (is_main_region0 || (input_base0 >= input_row_start && input_base0 < input_row_end)) {
+                            input_value0 = *input_base0;
+                        } else {
+                            input_value0 = 0.0f;
+                        }
+
+                        if (is_main_region1 || (input_base1 >= input_row_start && input_base1 < input_row_end)) {
+                            input_value1 = *input_base1;
+                        } else {
+                            input_value1 = 0.0f;
+                        }
+
+                        const float32x4_t InputVector0 = MlasBroadcastFloat32x4(input_value0);
+                        const float32x4_t InputVector1 = MlasBroadcastFloat32x4(input_value1);
+
+                        size_t kernel_base_pos = kh * KernelWidth + kw;
+                        const float32x4_t FilterVector = MlasLoadFloat32x4(&filter[kernel_base_pos * BlockSize]);
+
+                        Accumulator0 = MlasMultiplyAddFloat32x4(InputVector0, FilterVector, Accumulator0);
+                        Accumulator1 = MlasMultiplyAddFloat32x4(InputVector1, FilterVector, Accumulator1);
+                    }
+                }
+            }
+
+            if (ReluActivation) {
+                Accumulator0 = MlasMaximumFloat32x4(Accumulator0, ZeroVector);
+                Accumulator1 = MlasMaximumFloat32x4(Accumulator1, ZeroVector);
+            }
+
+            MlasStoreFloat32x4(&output[output_idx * BlockSize], Accumulator0);
+            MlasStoreFloat32x4(&output[(output_idx + 1) * BlockSize], Accumulator1);
+        }
+
+        if (output_idx < TotalOutputCount) {
+            bool is_main_region = (output_idx >= OutputCountLeftPad && output_idx < OutputCountLeftPad + OutputCount);
 
             float32x4_t Accumulator;
 
@@ -83,44 +182,68 @@ void
             }
 
             if (BiasAddition) {
-                const float32x4_t BiasVector = MlasLoadFloat32x4(&Bias[filterSetBlock * BlockSize]);
+                const float32x4_t BiasVector = MlasLoadFloat32x4(bias_ptr);
                 Accumulator = MlasAddFloat32x4(Accumulator, BiasVector);
             }
 
             for (size_t kh = 0; kh < KernelHeight; kh++) {
+                const float* input_row_start = InputBase + kh * DilatedInputWidthElements;
+                const float* input_row_end = input_row_start + InputWidthElements;
+
                 for (size_t kw = 0; kw < KernelWidth; kw++) {
                     const float* input_base = Input + output_idx * StrideWidthElements +
                                               kh * DilatedInputWidthElements + kw * DilationWidthElements;
 
                     if (IsNchwcFormat) {
-                        // NCHWC format - process each element in the block
-                        for (size_t filterBlock = 0; filterBlock < BlockSize; filterBlock++) {
-                            const float* input_element = input_base + filterBlock;
-                            const float* input_row_start = InputBase + kh * DilatedInputWidthElements;
-                            const float* input_row_end = input_row_start + InputWidthElements;
+                        const float* input_element0 = input_base;
+                        const float* input_element1 = input_base + 1;
+                        const float* input_element2 = input_base + 2;
+                        const float* input_element3 = input_base + 3;
 
-                            float input_value;
-                            if (is_main_region || (input_element >= input_row_start && input_element < input_row_end)) {
-                                input_value = *input_element;
-                            } else {
-                                input_value = 0.0f;
-                            }
+                        float input_value0, input_value1, input_value2, input_value3;
 
-                            const float32x4_t InputVector = MlasBroadcastFloat32x4(input_value);
-
-                            size_t kernel_base_pos = kh * (KernelWidth * BlockSize * BlockSize) +
-                                                     kw * (BlockSize * BlockSize) +
-                                                     filterBlock * BlockSize;
-
-                            const float32x4_t FilterVector = MlasLoadFloat32x4(&filter[kernel_base_pos]);
-
-                            Accumulator = MlasMultiplyAddFloat32x4(InputVector, FilterVector, Accumulator);
+                        if (is_main_region || (input_element0 >= input_row_start && input_element0 < input_row_end)) {
+                            input_value0 = *input_element0;
+                        } else {
+                            input_value0 = 0.0f;
                         }
-                    } else {
-                        // NCHW format - simpler processing
-                        const float* input_row_start = InputBase + kh * DilatedInputWidthElements;
-                        const float* input_row_end = input_row_start + InputWidthElements;
 
+                        if (is_main_region || (input_element1 >= input_row_start && input_element1 < input_row_end)) {
+                            input_value1 = *input_element1;
+                        } else {
+                            input_value1 = 0.0f;
+                        }
+
+                        if (is_main_region || (input_element2 >= input_row_start && input_element2 < input_row_end)) {
+                            input_value2 = *input_element2;
+                        } else {
+                            input_value2 = 0.0f;
+                        }
+
+                        if (is_main_region || (input_element3 >= input_row_start && input_element3 < input_row_end)) {
+                            input_value3 = *input_element3;
+                        } else {
+                            input_value3 = 0.0f;
+                        }
+
+                        size_t kernel_base_pos = kh * (KernelWidth * 16) + kw * 16;
+
+                        const float32x4_t InputVector0 = MlasBroadcastFloat32x4(input_value0);
+                        const float32x4_t FilterVector0 = MlasLoadFloat32x4(&filter[kernel_base_pos]);
+                        Accumulator = MlasMultiplyAddFloat32x4(InputVector0, FilterVector0, Accumulator);
+
+                        const float32x4_t InputVector1 = MlasBroadcastFloat32x4(input_value1);
+                        const float32x4_t FilterVector1 = MlasLoadFloat32x4(&filter[kernel_base_pos + 4]);
+                        Accumulator = MlasMultiplyAddFloat32x4(InputVector1, FilterVector1, Accumulator);
+
+                        const float32x4_t InputVector2 = MlasBroadcastFloat32x4(input_value2);
+                        const float32x4_t FilterVector2 = MlasLoadFloat32x4(&filter[kernel_base_pos + 8]);
+                        Accumulator = MlasMultiplyAddFloat32x4(InputVector2, FilterVector2, Accumulator);
+
+                        const float32x4_t InputVector3 = MlasBroadcastFloat32x4(input_value3);
+                        const float32x4_t FilterVector3 = MlasLoadFloat32x4(&filter[kernel_base_pos + 12]);
+                        Accumulator = MlasMultiplyAddFloat32x4(InputVector3, FilterVector3, Accumulator);
+                    } else {
                         float input_value;
                         if (is_main_region || (input_base >= input_row_start && input_base < input_row_end)) {
                             input_value = *input_base;
@@ -131,7 +254,6 @@ void
                         const float32x4_t InputVector = MlasBroadcastFloat32x4(input_value);
 
                         size_t kernel_base_pos = kh * KernelWidth + kw;
-
                         const float32x4_t FilterVector = MlasLoadFloat32x4(&filter[kernel_base_pos * BlockSize]);
 
                         Accumulator = MlasMultiplyAddFloat32x4(InputVector, FilterVector, Accumulator);
@@ -293,7 +415,6 @@ void
 
     const size_t TotalOutputCount = OutputCountLeftPad + OutputCount + OutputCountRightPad;
 
-    // Process outputs in pairs when possible for better data reuse
     size_t output_idx;
     for (output_idx = 0; output_idx + 1 < TotalOutputCount; output_idx += 2) {
         bool is_main_region0 = (output_idx >= OutputCountLeftPad && output_idx < OutputCountLeftPad + OutputCount);
@@ -301,7 +422,6 @@ void
 
         float32x4_t Accumulator0, Accumulator1;
 
-        // Initialize accumulators for both positions
         if (AccumulateOutput) {
             Accumulator0 = MlasLoadFloat32x4(&Output[output_idx * BlockSize]);
             Accumulator1 = MlasLoadFloat32x4(&Output[(output_idx + 1) * BlockSize]);
@@ -309,8 +429,7 @@ void
             Accumulator0 = MlasBroadcastFloat32x4(0.0f);
             Accumulator1 = MlasBroadcastFloat32x4(0.0f);
         }
-        
-        // Preserve the bias addition formula
+
         if (BiasAddition) {
             const float32x4_t BiasVector = MlasLoadFloat32x4(Bias);
             Accumulator0 = MlasAddFloat32x4(Accumulator0, BiasVector);
@@ -320,55 +439,49 @@ void
         for (size_t kh = 0; kh < KernelHeight; kh++) {
             const float* input_row_start = InputBase + kh * DilatedInputWidthElements;
             const float* input_row_end = input_row_start + InputWidthElements;
-            
+
             for (size_t kw = 0; kw < KernelWidth; kw++) {
                 size_t kernel_pos = kh * KernelWidth + kw;
                 const float32x4_t FilterVector = MlasLoadFloat32x4(&Filter[kernel_pos * BlockSize]);
 
                 const float* input_base0 = Input + output_idx * StrideWidthElements +
-                                          kh * DilatedInputWidthElements + kw * DilationWidthElements;
+                                           kh * DilatedInputWidthElements + kw * DilationWidthElements;
                 const float* input_base1 = Input + (output_idx + 1) * StrideWidthElements +
-                                          kh * DilatedInputWidthElements + kw * DilationWidthElements;
+                                           kh * DilatedInputWidthElements + kw * DilationWidthElements;
 
                 float32x4_t InputVector0, InputVector1;
 
-                // Handle first output position
                 if (is_main_region0) {
                     InputVector0 = MlasLoadFloat32x4(input_base0);
                 } else {
-                    // Efficiently handle boundary conditions for first position
                     float input_values0[4];
-                    
+
                     input_values0[0] = (input_base0 >= input_row_start && input_base0 < input_row_end) ? input_base0[0] : 0.0f;
                     input_values0[1] = (input_base0 + 1 >= input_row_start && input_base0 + 1 < input_row_end) ? input_base0[1] : 0.0f;
                     input_values0[2] = (input_base0 + 2 >= input_row_start && input_base0 + 2 < input_row_end) ? input_base0[2] : 0.0f;
                     input_values0[3] = (input_base0 + 3 >= input_row_start && input_base0 + 3 < input_row_end) ? input_base0[3] : 0.0f;
-                    
+
                     InputVector0 = MlasLoadFloat32x4(input_values0);
                 }
 
-                // Handle second output position
                 if (is_main_region1) {
                     InputVector1 = MlasLoadFloat32x4(input_base1);
                 } else {
-                    // Efficiently handle boundary conditions for second position
                     float input_values1[4];
-                    
+
                     input_values1[0] = (input_base1 >= input_row_start && input_base1 < input_row_end) ? input_base1[0] : 0.0f;
                     input_values1[1] = (input_base1 + 1 >= input_row_start && input_base1 + 1 < input_row_end) ? input_base1[1] : 0.0f;
                     input_values1[2] = (input_base1 + 2 >= input_row_start && input_base1 + 2 < input_row_end) ? input_base1[2] : 0.0f;
                     input_values1[3] = (input_base1 + 3 >= input_row_start && input_base1 + 3 < input_row_end) ? input_base1[3] : 0.0f;
-                    
+
                     InputVector1 = MlasLoadFloat32x4(input_values1);
                 }
 
-                // Process both positions with the same filter
                 Accumulator0 = MlasMultiplyAddFloat32x4(InputVector0, FilterVector, Accumulator0);
                 Accumulator1 = MlasMultiplyAddFloat32x4(InputVector1, FilterVector, Accumulator1);
             }
         }
 
-        // Apply ReLU and store results
         if (ReluActivation) {
             Accumulator0 = MlasMaximumFloat32x4(Accumulator0, ZeroVector);
             Accumulator1 = MlasMaximumFloat32x4(Accumulator1, ZeroVector);
@@ -378,7 +491,6 @@ void
         MlasStoreFloat32x4(&Output[(output_idx + 1) * BlockSize], Accumulator1);
     }
 
-    // Handle remaining single output position if TotalOutputCount is odd
     if (output_idx < TotalOutputCount) {
         bool is_main_region = (output_idx >= OutputCountLeftPad && output_idx < OutputCountLeftPad + OutputCount);
 
@@ -389,8 +501,7 @@ void
         } else {
             Accumulator = MlasBroadcastFloat32x4(0.0f);
         }
-        
-        // Preserve the bias addition formula
+
         if (BiasAddition) {
             Accumulator = MlasAddFloat32x4(Accumulator, MlasLoadFloat32x4(Bias));
         }
@@ -398,7 +509,7 @@ void
         for (size_t kh = 0; kh < KernelHeight; kh++) {
             const float* input_row_start = InputBase + kh * DilatedInputWidthElements;
             const float* input_row_end = input_row_start + InputWidthElements;
-            
+
             for (size_t kw = 0; kw < KernelWidth; kw++) {
                 size_t kernel_pos = kh * KernelWidth + kw;
 
@@ -410,14 +521,13 @@ void
                 if (is_main_region) {
                     InputVector = MlasLoadFloat32x4(input_base);
                 } else {
-                    // Efficiently handle boundary conditions
                     float input_values[4];
-                    
+
                     input_values[0] = (input_base >= input_row_start && input_base < input_row_end) ? input_base[0] : 0.0f;
                     input_values[1] = (input_base + 1 >= input_row_start && input_base + 1 < input_row_end) ? input_base[1] : 0.0f;
                     input_values[2] = (input_base + 2 >= input_row_start && input_base + 2 < input_row_end) ? input_base[2] : 0.0f;
                     input_values[3] = (input_base + 3 >= input_row_start && input_base + 3 < input_row_end) ? input_base[3] : 0.0f;
-                    
+
                     InputVector = MlasLoadFloat32x4(input_values);
                 }
 
@@ -476,14 +586,11 @@ void
         const float* filter = Filter + f * FilterStrideElements;
         float* output = Output + f * OutputStrideElements;
         const float* bias_ptr = BiasAddition ? &Bias[f * BlockSize] : nullptr;
-        
-        // Process outputs in pairs when possible for better data reuse
+
         size_t i;
         for (i = 0; i + 1 < OutputCount; i += 2) {
-            // Process two output positions together
             float32x4_t Accumulator0, Accumulator1;
-            
-            // Initialize accumulators for both positions
+
             if (AccumulateOutput) {
                 Accumulator0 = MlasLoadFloat32x4(&output[i * BlockSize]);
                 Accumulator1 = MlasLoadFloat32x4(&output[(i + 1) * BlockSize]);
@@ -491,42 +598,37 @@ void
                 Accumulator0 = MlasBroadcastFloat32x4(0.0f);
                 Accumulator1 = MlasBroadcastFloat32x4(0.0f);
             }
-            
+
             if (BiasAddition) {
                 const float32x4_t BiasVector = MlasLoadFloat32x4(bias_ptr);
                 Accumulator0 = MlasAddFloat32x4(Accumulator0, BiasVector);
                 Accumulator1 = MlasAddFloat32x4(Accumulator1, BiasVector);
             }
-            
+
             for (size_t c = 0; c < InputChannels; c++) {
                 const float* input_ptr0 = Input + c * InputStrideElements + i * StrideWidthElements;
                 const float* input_ptr1 = Input + c * InputStrideElements + (i + 1) * StrideWidthElements;
                 const float* filter_base = filter + c * BlockSize * BlockSize;
-                
-                // Load all 4 input values at once for each position
+
                 const float32x4_t input_vec0 = MlasLoadFloat32x4(input_ptr0);
                 const float32x4_t input_vec1 = MlasLoadFloat32x4(input_ptr1);
-                
-                // Load all filter values for this channel
+
                 const float32x4_t FilterVector0 = MlasLoadFloat32x4(filter_base);
                 const float32x4_t FilterVector1 = MlasLoadFloat32x4(filter_base + BlockSize);
                 const float32x4_t FilterVector2 = MlasLoadFloat32x4(filter_base + BlockSize * 2);
                 const float32x4_t FilterVector3 = MlasLoadFloat32x4(filter_base + BlockSize * 3);
-                
-                // Process first position - use vdupq_laneq_f32 to broadcast individual elements
+
                 Accumulator0 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec0, 0), FilterVector0, Accumulator0);
                 Accumulator0 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec0, 1), FilterVector1, Accumulator0);
                 Accumulator0 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec0, 2), FilterVector2, Accumulator0);
                 Accumulator0 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec0, 3), FilterVector3, Accumulator0);
-                
-                // Process second position
+
                 Accumulator1 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec1, 0), FilterVector0, Accumulator1);
                 Accumulator1 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec1, 1), FilterVector1, Accumulator1);
                 Accumulator1 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec1, 2), FilterVector2, Accumulator1);
                 Accumulator1 = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec1, 3), FilterVector3, Accumulator1);
             }
-            
-            // Apply ReLU and store results
+
             if (ReluActivation) {
                 Accumulator0 = MlasMaximumFloat32x4(Accumulator0, ZeroVector);
                 Accumulator1 = MlasMaximumFloat32x4(Accumulator1, ZeroVector);
@@ -534,8 +636,7 @@ void
             MlasStoreFloat32x4(&output[i * BlockSize], Accumulator0);
             MlasStoreFloat32x4(&output[(i + 1) * BlockSize], Accumulator1);
         }
-        
-        // Handle remaining single output position if OutputCount is odd
+
         if (i < OutputCount) {
             float32x4_t Accumulator;
             if (AccumulateOutput) {
@@ -543,32 +644,29 @@ void
             } else {
                 Accumulator = MlasBroadcastFloat32x4(0.0f);
             }
-            
+
             if (BiasAddition) {
                 const float32x4_t BiasVector = MlasLoadFloat32x4(bias_ptr);
                 Accumulator = MlasAddFloat32x4(Accumulator, BiasVector);
             }
-            
+
             for (size_t c = 0; c < InputChannels; c++) {
                 const float* input_ptr = Input + c * InputStrideElements + i * StrideWidthElements;
                 const float* filter_base = filter + c * BlockSize * BlockSize;
-                
-                // Load all 4 input values at once
+
                 const float32x4_t input_vec = MlasLoadFloat32x4(input_ptr);
-                
-                // Load all filter values for this channel
+
                 const float32x4_t FilterVector0 = MlasLoadFloat32x4(filter_base);
                 const float32x4_t FilterVector1 = MlasLoadFloat32x4(filter_base + BlockSize);
                 const float32x4_t FilterVector2 = MlasLoadFloat32x4(filter_base + BlockSize * 2);
                 const float32x4_t FilterVector3 = MlasLoadFloat32x4(filter_base + BlockSize * 3);
-                
-                // Process using vdupq_laneq_f32 to broadcast individual elements
+
                 Accumulator = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec, 0), FilterVector0, Accumulator);
                 Accumulator = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec, 1), FilterVector1, Accumulator);
                 Accumulator = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec, 2), FilterVector2, Accumulator);
                 Accumulator = MlasMultiplyAddFloat32x4(vdupq_laneq_f32(input_vec, 3), FilterVector3, Accumulator);
             }
-            
+
             if (ReluActivation) {
                 Accumulator = MlasMaximumFloat32x4(Accumulator, ZeroVector);
             }
