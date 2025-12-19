@@ -1370,6 +1370,7 @@ struct MLAS_PLATFORM {
     MLAS_CONV_FLOAT_KERNEL* ConvNchwcFloatKernel;
     MLAS_CONV_DEPTHWISE_FLOAT_KERNEL* ConvDepthwiseFloatKernel;
     MLAS_CONV_POINTWISE_FLOAT_KERNEL* ConvPointwiseFloatKernel;
+    MLAS_CONV_POINTWISE_FLOAT_KERNEL* ConvPointwiseBf16Kernel;
     MLAS_POOL_FLOAT_KERNEL* PoolFloatKernel[MlasPoolingKindCount];
     uint32_t NchwcBlockSize;
 #endif

@@ -1232,7 +1232,8 @@ MlasNchwcConv(
     float* Output,
     const MLAS_ACTIVATION* Activation,
     bool ZeroMode,
-    MLAS_THREADPOOL* ThreadPool
+    MLAS_THREADPOOL* ThreadPool,
+    bool UseBf16 = false
     );
 
 void
